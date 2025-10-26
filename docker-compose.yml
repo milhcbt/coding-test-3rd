@@ -1,4 +1,4 @@
-version: '3.8'
+# version: '3.8' #the attribute `version` is obsolete in docker-compose v3.9 and above
 
 services:
   postgres:
@@ -56,7 +56,7 @@ services:
         condition: service_healthy
     command: >
       sh -c "
-        python app/db/init_db.py &&
+        python -m app.db.init_db &&
         uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
       "
 
