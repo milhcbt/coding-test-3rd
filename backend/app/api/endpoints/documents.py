@@ -19,6 +19,9 @@ from app.core.config import settings
 
 router = APIRouter()
 
+# Minimal in-memory stats cache for MVP display (consider DB column in future)
+_doc_stats_cache: dict[int, dict] = {}
+
 
 @router.post("/upload", response_model=DocumentUploadResponse)
 async def upload_document(
@@ -102,6 +105,9 @@ async def process_document_task(document_id: int, file_path: str, fund_id: int):
         document.parsing_status = result["status"]
         if result["status"] == "failed":
             document.error_message = result.get("error")
+        else:
+            # Cache stats for status endpoint
+            _doc_stats_cache[document_id] = result.get("stats", {})
         db.commit()
         
     except Exception as e:
@@ -124,7 +130,8 @@ async def get_document_status(document_id: int, db: Session = Depends(get_db)):
     return DocumentStatus(
         document_id=document.id,
         status=document.parsing_status,
-        error_message=document.error_message
+        error_message=document.error_message,
+        stats=_doc_stats_cache.get(document_id)
     )
 
 

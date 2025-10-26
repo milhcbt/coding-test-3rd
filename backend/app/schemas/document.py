@@ -41,6 +41,7 @@ class DocumentStatus(BaseModel):
     status: str
     progress: Optional[float] = None
     error_message: Optional[str] = None
+    stats: Optional[dict] = None
 
 
 class DocumentUploadResponse(BaseModel):

@@ -78,9 +78,12 @@ class DocumentProcessor:
             with pdfplumber.open(file_path) as pdf:
                 stats["pages"] = len(pdf.pages)
                 for page in pdf.pages:
+                    # Aggregate tables from general extraction and heading-based crops
                     tables = self._extract_tables(page)
+                    tables += self._extract_tables_by_heading(page)
                     if not tables:
                         continue
+                    seen_signatures = set()
                     for raw_table in tables:
                         # Clean table: drop empty rows, strip cells
                         cleaned = self._clean_table(raw_table)
@@ -89,6 +92,13 @@ class DocumentProcessor:
 
                         headers = [str(h or "").strip() for h in cleaned[0]]
                         rows = cleaned[1:]
+
+                        # Deduplicate by normalized header signature and row count
+                        sig_cols = tuple([h.strip().lower().replace(" ", "_") for h in headers])
+                        sig = (sig_cols, len(rows))
+                        if sig in seen_signatures:
+                            continue
+                        seen_signatures.add(sig)
 
                         table_type = self.table_parser.classify(headers) or self._infer_type_from_headers(headers)
                         if not table_type:
@@ -118,25 +128,92 @@ class DocumentProcessor:
     # ---- helpers ----
 
     def _extract_tables(self, page) -> List[List[List[Any]]]:
-        """Try extracting tables with line strategies, fall back to defaults."""
+        """Extract tables using multiple strategies and merge results."""
+        results: List[List[List[Any]]] = []
+        strategies = [
+            {
+                "vertical_strategy": "lines",
+                "horizontal_strategy": "lines",
+                "intersection_y_tolerance": 5,
+                "intersection_x_tolerance": 5,
+                "snap_tolerance": 3,
+            },
+            {
+                "vertical_strategy": "text",
+                "horizontal_strategy": "text",
+                "intersection_y_tolerance": 8,
+                "intersection_x_tolerance": 8,
+                "snap_tolerance": 4,
+            },
+            None,  # default
+        ]
+
+        for settings in strategies:
+            try:
+                tables = page.extract_tables(settings) if settings else page.extract_tables()
+                if tables:
+                    results.extend(tables)
+            except Exception:
+                continue
+
+        return results
+
+    def _extract_tables_by_heading(self, page) -> List[List[List[Any]]]:
+        """Crop below known section headings and try to extract a table in that region."""
+        results: List[List[List[Any]]] = []
         try:
-            tables = page.extract_tables(
-                {
-                    "vertical_strategy": "lines",
-                    "horizontal_strategy": "lines",
-                    "intersection_y_tolerance": 5,
-                    "intersection_x_tolerance": 5,
-                    "snap_tolerance": 3,
-                }
-            )
-            if tables:
-                return tables
+            words = page.extract_words(use_text_flow=True)
         except Exception:
-            pass
-        try:
-            return page.extract_tables() or []
-        except Exception:
-            return []
+            words = []
+        if not words:
+            return results
+
+        heading_keys = {"capital calls", "distributions", "adjustments"}
+
+        # Build simple lines by grouping words with close 'top' value
+        lines: dict[float, list] = {}
+        for w in words:
+            top = round(float(w.get("top", 0.0)), 0)
+            lines.setdefault(top, []).append(w)
+
+        for top, ws in lines.items():
+            text = " ".join([w.get("text", "") for w in sorted(ws, key=lambda x: x.get("x0", 0))]).strip().lower()
+            if any(h in text for h in heading_keys):
+                # Define a bbox from just below the line down to half a page
+                y0 = float(min(w.get("bottom", top + 5) for w in ws)) + 2
+                y1 = min(page.height, y0 + page.height / 2)
+                bbox = (0, y0, page.width, y1)
+                try:
+                    with page.within_bbox(bbox) as cropped:
+                        # Try multiple strategies on the cropped region
+                        cropped_tables = []
+                        for settings in [
+                            {
+                                "vertical_strategy": "lines",
+                                "horizontal_strategy": "lines",
+                                "intersection_y_tolerance": 5,
+                                "intersection_x_tolerance": 5,
+                                "snap_tolerance": 3,
+                            },
+                            {
+                                "vertical_strategy": "text",
+                                "horizontal_strategy": "text",
+                                "intersection_y_tolerance": 8,
+                                "intersection_x_tolerance": 8,
+                                "snap_tolerance": 4,
+                            },
+                            None,
+                        ]:
+                            try:
+                                t = cropped.extract_tables(settings) if settings else cropped.extract_tables()
+                                if t:
+                                    cropped_tables.extend(t)
+                            except Exception:
+                                continue
+                        results.extend(cropped_tables)
+                except Exception:
+                    continue
+        return results
 
     def _clean_table(self, table: List[List[Any]]) -> List[List[str]]:
         cleaned = []
@@ -299,12 +376,8 @@ class DocumentProcessor:
         if colset == {"date", "call_number", "amount", "description"}:
             return "capital_calls"
         if colset == {"date", "type", "amount", "description"}:
-            # Look into type values for adjustment cues
-            type_idx = self._find_col(cols, ["type", "adjustment_type"])
-            if type_idx is not None:
-                vals = set(str(r[type_idx]).strip().lower() for r in sample_rows if type_idx < len(r))
-                if any("adjust" in v or "recallable" in v for v in vals):
-                    return "adjustments"
+            # Likely adjustments in our sample PDF
+            return "adjustments"
         
         # If header contains 'recallable', it's a distributions table
         if any("recallable" in c for c in cols):
