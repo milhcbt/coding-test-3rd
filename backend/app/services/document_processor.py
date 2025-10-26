@@ -96,6 +96,8 @@ class DocumentProcessor:
 
                         stats["tables_found"] += 1
                         parsed = self.table_parser.parse(headers, rows)
+                        # Refine type based on normalized columns and sample rows
+                        table_type = self._deduce_type_from_content(table_type, parsed)
                         inserted, skipped = self._insert_rows(db, table_type, parsed, fund.id)
                         stats["inserted"][table_type] += inserted
                         stats["skipped_rows"] += skipped
@@ -281,3 +283,35 @@ class DocumentProcessor:
     # Placeholder for future text chunking (not used in MVP)
     def _chunk_text(self, text_content: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         return []
+
+    def _deduce_type_from_content(self, initial_type: str, parsed: Dict[str, Any]) -> str:
+        """Refine table classification using columns and sample row values."""
+        cols = [c.lower() for c in parsed.get("columns", [])]
+        sample_rows = parsed.get("rows", [])[:5]
+
+        # If header contains 'recallable', it's a distributions table
+        if any("recallable" in c for c in cols):
+            return "distributions"
+        # If header mentions specific distribution words
+        if any("distribution" in c for c in cols):
+            return "distributions"
+        # If header contains 'call_number' or similar, it's capital calls
+        if any(c in {"call_number", "call_no", "call"} for c in cols):
+            return "capital_calls"
+        # If header contains 'adjustment' or 'category', likely adjustments
+        if any("adjustment" in c or c == "category" for c in cols):
+            return "adjustments"
+
+        # Inspect 'type' column values if present
+        try:
+            type_idx = self._find_col(cols, ["type", "call_type", "distribution_type", "adjustment_type"])
+        except Exception:
+            type_idx = None
+        if type_idx is not None:
+            vals = set(str(r[type_idx]).strip().lower() for r in sample_rows if type_idx < len(r))
+            if any(v for v in vals if any(k in v for k in ["return", "income", "distribution", "dividend"])):
+                return "distributions"
+            if any("adjust" in v for v in vals):
+                return "adjustments"
+
+        return initial_type
