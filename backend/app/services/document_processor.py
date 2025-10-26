@@ -98,10 +98,13 @@ class DocumentProcessor:
                         parsed = self.table_parser.parse(headers, rows)
                         # Refine type based on normalized columns and sample rows
                         table_type = self._deduce_type_from_content(table_type, parsed)
+                        print(f"[DocProc] Classified table as {table_type} with columns={parsed.get('columns')}")
                         inserted, skipped = self._insert_rows(db, table_type, parsed, fund.id)
+                        print(f"[DocProc] Inserted {inserted}, skipped {skipped} rows for {table_type}")
                         stats["inserted"][table_type] += inserted
                         stats["skipped_rows"] += skipped
 
+            print(f"[DocProc] Completed processing doc={document_id}, stats={stats}")
             return {"status": "completed", "stats": stats}
 
         except SQLAlchemyError as e:
@@ -289,6 +292,20 @@ class DocumentProcessor:
         cols = [c.lower() for c in parsed.get("columns", [])]
         sample_rows = parsed.get("rows", [])[:5]
 
+        # Exact header set matches for our sample PDF
+        colset = set(cols)
+        if colset == {"date", "type", "amount", "recallable", "description"}:
+            return "distributions"
+        if colset == {"date", "call_number", "amount", "description"}:
+            return "capital_calls"
+        if colset == {"date", "type", "amount", "description"}:
+            # Look into type values for adjustment cues
+            type_idx = self._find_col(cols, ["type", "adjustment_type"])
+            if type_idx is not None:
+                vals = set(str(r[type_idx]).strip().lower() for r in sample_rows if type_idx < len(r))
+                if any("adjust" in v or "recallable" in v for v in vals):
+                    return "adjustments"
+        
         # If header contains 'recallable', it's a distributions table
         if any("recallable" in c for c in cols):
             return "distributions"
