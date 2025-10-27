@@ -15,6 +15,8 @@ from langchain_openai import OpenAIEmbeddings
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from app.core.config import settings
 from app.db.session import SessionLocal
+import json
+import hashlib
 
 
 class VectorStore:
@@ -27,16 +29,49 @@ class VectorStore:
     
     def _initialize_embeddings(self):
         """Initialize embedding model"""
+        # Try OpenAI first if API key provided
         if settings.OPENAI_API_KEY:
-            return OpenAIEmbeddings(
-                model=settings.OPENAI_EMBEDDING_MODEL,
-                openai_api_key=settings.OPENAI_API_KEY
-            )
-        else:
-            # Fallback to local embeddings
+            try:
+                return OpenAIEmbeddings(
+                    model=settings.OPENAI_EMBEDDING_MODEL,
+                    openai_api_key=settings.OPENAI_API_KEY
+                )
+            except Exception as e:
+                print(f"OpenAIEmbeddings init failed, falling back to local: {e}")
+
+        # Try local HuggingFace model
+        try:
             return HuggingFaceEmbeddings(
                 model_name="sentence-transformers/all-MiniLM-L6-v2"
             )
+        except Exception as e:
+            print(f"HuggingFaceEmbeddings init failed, falling back to SimpleEmbedder: {e}")
+
+            # Final deterministic offline fallback
+            class SimpleEmbedder:
+                dim = 384
+
+                def __init__(self) -> None:
+                    pass
+
+                def embed_query(self, text: str):
+                    return self.encode(text)
+
+                def encode(self, text: str):
+                    # Hash-based pseudo-embedding with fixed dimension
+                    vec = np.zeros(self.dim, dtype=np.float32)
+                    if not text:
+                        return vec.tolist()
+                    # Use multiple hash seeds to spread signal
+                    for i, token in enumerate(text.split()):
+                        h = hashlib.sha256(f"{i}:{token}".encode()).digest()
+                        for j in range(0, self.dim):
+                            vec[j] += h[j % len(h)] / 255.0
+                    # Normalize
+                    norm = np.linalg.norm(vec) or 1.0
+                    return (vec / norm).tolist()
+
+            return SimpleEmbedder()
     
     def _ensure_extension(self):
         """
@@ -101,7 +136,8 @@ class VectorStore:
                 "fund_id": metadata.get("fund_id"),
                 "content": content,
                 "embedding": str(embedding_list),
-                "metadata": str(metadata)
+                # Ensure valid JSON for Postgres JSONB
+                "metadata": json.dumps(metadata)
             })
             self.db.commit()
         except Exception as e:
