@@ -3,6 +3,7 @@ import sys
 import types
 import pytest
 from sqlalchemy import create_engine
+from sqlalchemy.pool import StaticPool
 from sqlalchemy.orm import sessionmaker
 
 # Ensure project root is on path
@@ -18,7 +19,13 @@ from app.core.config import settings  # noqa: E402
 @pytest.fixture(scope="session")
 def test_engine():
     # Use in-memory SQLite for fast unit tests
-    engine = create_engine("sqlite:///:memory:", echo=False)
+    # Use a single in-memory SQLite DB shared across threads (for TestClient)
+    engine = create_engine(
+        "sqlite://",
+        echo=False,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
     Base.metadata.create_all(bind=engine)
     return engine
 
